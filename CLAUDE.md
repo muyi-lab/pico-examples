@@ -138,12 +138,16 @@ echo "$OUTPUT" | grep -q "Hello, world!" && echo "PASS: output matched" || echo 
 
 Save validated output to a timestamped log:
 ```sh
-LOG_FILE="build/hello_world/serial/hello_serial_$(date +%Y%m%d_%H%M%S).log"
+LOG_DIR="build/hello_world/serial"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/hello_serial_$(date +%Y%m%d_%H%M%S).log"
 stty -F /dev/ttyS4 115200 cs8 -cstopb -parenb -ixon -ixoff -crtscts
-OUTPUT=$(timeout 10 cat /dev/ttyS4)
+OUTPUT=$(timeout 10 cat /dev/ttyS4 | tr -d '\0')
 echo "$OUTPUT" | tee "$LOG_FILE"
-echo "$OUTPUT" | grep -q "Hello, world!" && echo "PASS" >> "$LOG_FILE" || echo "FAIL" >> "$LOG_FILE"
+echo "$OUTPUT" | grep -q "Hello, world!" && echo "PASS" | tee -a "$LOG_FILE" || echo "FAIL" | tee -a "$LOG_FILE"
 ```
+
+Log file naming convention: `<target>_YYYYMMDD_HHMMSS.log` placed in the same directory as the build artifacts. Always `mkdir -p` the directory before writing — build subdirectories may not exist until the target is built.
 
 ## Repository Architecture
 
