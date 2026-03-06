@@ -7,7 +7,7 @@ This repository is a collection of Raspberry Pi Pico SDK examples. Top-level fol
 Use an out-of-tree CMake build:
 
 ```sh
-cmake -B build -S . -DPICO_BOARD=pico2
+cmake -B build -S . -DPICO_SDK_PATH=/home/macro/work/pico/pico-sdk -DPICO_NO_PICOTOOL=1 -DPICO_BOARD=pico2
 cmake --build build
 ```
 
@@ -17,7 +17,18 @@ Set `PICO_PLATFORM` explicitly when needed, for example `-DPICO_PLATFORM=rp2350`
 cmake --build build --target hello_serial
 ```
 
+In this environment, keep `-DPICO_NO_PICOTOOL=1` during configure. The installed `picotool` CLI is usable for flashing, but SDK-side picotool integration attempts a network fetch during CMake configure.
+
 When changing Pico W or FreeRTOS examples, configure any required SDK variables first, such as `PICO_BOARD=pico_w` or `FREERTOS_KERNEL_PATH`.
+
+For a single example, configure once and build just the target you are testing:
+
+```sh
+cmake -B build -S . -DPICO_SDK_PATH=/home/macro/work/pico/pico-sdk -DPICO_NO_PICOTOOL=1 -DPICO_BOARD=pico
+cmake --build build --target hello_serial
+```
+
+That also produces a loadable ELF such as `build/hello_world/serial/hello_serial.elf` and a flashable UF2 such as `build/hello_world/serial/hello_serial.uf2`.
 
 ## Coding Style & Naming Conventions
 Follow the existing C/C++ style from `CONTRIBUTING.md`:
@@ -29,6 +40,40 @@ Match surrounding naming. Most examples use lowercase, underscore-separated targ
 
 ## Testing Guidelines
 There is no centralized unit-test suite in this repository. The expected validation is successful CMake configure plus a clean build of the affected targets. Prefer targeted builds while developing, then rebuild the broader tree if you changed shared code or CMake logic. Include the board or platform used for validation in your PR notes.
+
+For hardware checking on the Radxa X4 RP2040, prefer the software path instead of manual `BOOTSEL`. Use `reboot_pico` to reset the controller into USB boot mode, then load the built ELF with `picotool`:
+
+```sh
+reboot_pico
+sleep 0.5
+picotool load build/hello_world/serial/hello_serial.elf --verify --execute
+```
+
+`picotool load` accepts `uf2`, `elf`, or `bin`; for this repository, prefer the generated `.elf` for direct programming and execution during iteration. If the board is already running compatible Pico SDK code, `picotool load -f build/.../hello_serial.elf --verify --execute` can trigger the reset into BOOTSEL automatically.
+
+If `picotool` is available, verify what is flashed:
+
+```sh
+picotool info -a
+```
+
+For UART-based examples in this environment, the Pico is connected to the host on `/dev/ttyS4`. Configure the port as `115200 8N1` and read it after flashing:
+
+```sh
+stty -F /dev/ttyS4 115200 cs8 -cstopb -parenb -ixon -ixoff -crtscts
+timeout 10 cat /dev/ttyS4
+```
+
+To save a UART log in the example directory with a timestamped filename:
+
+```sh
+LOG_DIR=build/hello_world/serial
+LOG_FILE="$LOG_DIR/hello_serial_$(date +%Y%m%d_%H%M%S).log"
+stty -F /dev/ttyS4 115200 cs8 -cstopb -parenb -ixon -ixoff -crtscts
+timeout 10 cat /dev/ttyS4 | tee "$LOG_FILE"
+```
+
+`hello_serial` should print `Hello, world!` once per second on `/dev/ttyS4`. If software reset is unavailable, fall back to the standard Pico-series `BOOTSEL` mass-storage flow and copy the generated `.uf2`.
 
 ## Commit & Pull Request Guidelines
 Recent commit subjects are short, imperative, and specific, for example `require SDK version 2.2.0` or `Update multi gcc (#689)`. Keep commits focused and descriptive.
