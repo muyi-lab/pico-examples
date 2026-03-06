@@ -112,11 +112,37 @@ Or with minicom (interactive):
 sudo minicom -D /dev/ttyS4 -b 115200
 ```
 
-Save output to a timestamped log:
+### Content Validation (required — do not skip)
+
+Capturing output is not sufficient. Always validate the content matches what the example is expected to print. Use `grep` to assert the expected string is present and fail clearly if it is not:
+
+```sh
+# stty MUST be a separate command before capture — chaining with && drops output
+stty -F /dev/ttyS4 115200 cs8 -cstopb -parenb -ixon -ixoff -crtscts
+OUTPUT=$(timeout 5 cat /dev/ttyS4)
+echo "$OUTPUT"
+echo "$OUTPUT" | grep -q "Hello, world!" && echo "PASS: output matched" || echo "FAIL: expected output not found"
+```
+
+For USB CDC examples (e.g. `hello_usb`):
+```sh
+OUTPUT=$(timeout 5 cat /dev/ttyACM0)
+echo "$OUTPUT"
+echo "$OUTPUT" | grep -q "Hello, world!" && echo "PASS: output matched" || echo "FAIL: expected output not found"
+```
+
+**What to check:**
+- The expected string appears at least once in the captured output
+- Output repeats at the correct interval (count lines: `echo "$OUTPUT" | grep -c "Hello, world!"` should be > 1 for a 5 s window)
+- No garbled/empty output (indicates wrong baud rate or UART misconfiguration)
+
+Save validated output to a timestamped log:
 ```sh
 LOG_FILE="build/hello_world/serial/hello_serial_$(date +%Y%m%d_%H%M%S).log"
 stty -F /dev/ttyS4 115200 cs8 -cstopb -parenb -ixon -ixoff -crtscts
-timeout 10 cat /dev/ttyS4 | tee "$LOG_FILE"
+OUTPUT=$(timeout 10 cat /dev/ttyS4)
+echo "$OUTPUT" | tee "$LOG_FILE"
+echo "$OUTPUT" | grep -q "Hello, world!" && echo "PASS" >> "$LOG_FILE" || echo "FAIL" >> "$LOG_FILE"
 ```
 
 ## Repository Architecture
