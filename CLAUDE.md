@@ -22,6 +22,17 @@ Radxa X4
 
 Current local board is **pico (rp2040)**; build directory is `build/`. A separate `build-pico2/` exists for pico2 (rp2350).
 
+## Check Build Environment
+
+Verify the compiler and build tools are available:
+```sh
+arm-none-eabi-gcc --version && cmake --version
+```
+
+Expected output:
+- `arm-none-eabi-gcc` — version 13.x or later
+- `cmake` — version 3.17 or later (SDK requires 3.17+)
+
 ## Prerequisites (one-time setup)
 
 Install build tools if not already present:
