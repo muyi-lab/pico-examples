@@ -8,3 +8,4 @@ build_*
 .DS_Store
 *.pdf
 logs
+workflow_state.json
