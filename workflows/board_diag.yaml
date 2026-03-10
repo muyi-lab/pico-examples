@@ -1,0 +1,167 @@
+name: board_diag
+description: >
+  Diagnostic workflow: verify board connectivity and capabilities.
+  Run when setting up a new board or debugging connection issues.
+  All checks use action:report so the full diagnostic completes even if
+  individual checks fail; a final report step summarises all findings.
+
+# ---------------------------------------------------------------------------
+# Parameters
+# ---------------------------------------------------------------------------
+params:
+  serial_port:
+    description: UART serial port device path
+    default: "/dev/ttyS4"
+  baud_rate:
+    description: UART baud rate
+    default: "115200"
+  board:
+    description: Target board (pico | pico_w | pico2 | pico2_w)
+    default: "pico"
+  run_flash_test:
+    description: Flash a test binary as part of diagnostics (true | false)
+    default: "false"
+  build_dir:
+    description: CMake build directory used to locate .uf2 test binaries
+    default: "build"
+  log_dir:
+    description: Directory for per-step log files
+    default: "logs"
+
+# ---------------------------------------------------------------------------
+# Environment — injected into every subprocess
+# ---------------------------------------------------------------------------
+env:
+  SERIAL_PORT:    "{{ params.serial_port }}"
+  BAUD_RATE:      "{{ params.baud_rate }}"
+  PICO_BOARD:     "{{ params.board }}"
+  RUN_FLASH_TEST: "{{ params.run_flash_test }}"
+  BUILD_DIR:      "{{ params.build_dir }}"
+  LOG_DIR:        "{{ params.log_dir }}"
+
+# ---------------------------------------------------------------------------
+# Steps — linear chain: check_usb → check_picotool → check_serial
+#                        → flash_test → check_debug_probe → report
+# All non-report steps use action:report so diagnostics run to completion.
+# ---------------------------------------------------------------------------
+steps:
+
+  # ---- 1. USB device detection --------------------------------------------
+  - id: check_usb
+    description: Detect RP2040/RP2350 device on USB bus (vendor 2e8a)
+    run: bash scripts/check_board.sh usb
+    check:
+      - type: exit_code
+        value: 0
+      - type: log_grep
+        file: "{{ env.LOG_DIR }}/check_board_usb.log"
+        pattern: "USB check PASSED"
+    on_failure:
+      action: report
+      message: >
+        No Raspberry Pi / Pico device found on USB.
+        Check: board is powered and connected via USB, try a different cable.
+        Ensure lsusb is installed: sudo apt-get install usbutils
+    on_success:
+      message: "USB device detected"
+
+  # ---- 2. picotool installation and board detection -----------------------
+  - id: check_picotool
+    description: Verify picotool is installed and can query the connected board
+    depends_on: [check_usb]
+    run: bash scripts/check_board.sh picotool
+    check:
+      - type: exit_code
+        value: 0
+      - type: log_grep
+        file: "{{ env.LOG_DIR }}/check_board_picotool.log"
+        pattern: "picotool check PASSED"
+    on_failure:
+      action: report
+      message: >
+        picotool check failed.
+        Install picotool: https://github.com/raspberrypi/picotool
+        Run 'reboot_pico' to enter BOOTSEL mode, then retry.
+    on_success:
+      message: "picotool OK"
+
+  # ---- 3. UART serial port accessibility ----------------------------------
+  - id: check_serial
+    description: "Check UART serial port: {{ params.serial_port }} @ {{ params.baud_rate }}"
+    depends_on: [check_picotool]
+    run: bash scripts/check_board.sh serial
+    check:
+      - type: exit_code
+        value: 0
+      - type: log_grep
+        file: "{{ env.LOG_DIR }}/check_board_serial.log"
+        pattern: "serial check PASSED"
+    on_failure:
+      action: report
+      message: >
+        Serial port {{ params.serial_port }} not accessible.
+        Check: correct port path, board is running firmware with UART output,
+        user is in dialout group: sudo usermod -aG dialout $USER
+    on_success:
+      message: "Serial port {{ params.serial_port }} accessible"
+
+  # ---- 4. Flash test (optional) -------------------------------------------
+  - id: flash_test
+    description: Flash hello_serial, then verify "Hello, World!" on UART (skipped if run_flash_test=false)
+    depends_on: [check_serial]
+    run: bash scripts/check_board.sh flash_test
+    check:
+      - type: exit_code
+        value: 0
+      - type: log_grep
+        file: "{{ env.LOG_DIR }}/check_board_flash_test.log"
+        pattern: "flash_test PASSED"
+    on_failure:
+      action: report
+      message: >
+        Flash test failed.
+        Ensure hello_serial is built: python3 runner/workflow_runner.py workflows/build_example.yaml --param target=hello_serial
+        Verify picotool and reboot_pico are in PATH.
+        Skip with: --param run_flash_test=false
+    on_success:
+      message: "hello_serial flashed and 'Hello, World!' confirmed on {{ params.serial_port }}"
+
+  # ---- 5. Debug probe detection -------------------------------------------
+  - id: check_debug_probe
+    description: Detect debug probe hardware and tools (openocd, pyocd, CMSIS-DAP)
+    depends_on: [flash_test]
+    run: bash scripts/check_board.sh debug_probe
+    check:
+      - type: exit_code
+        value: 0
+      - type: log_grep
+        file: "{{ env.LOG_DIR }}/check_board_debug_probe.log"
+        pattern: "debug_probe check COMPLETE"
+    on_failure:
+      action: report
+      message: >
+        Debug probe check did not complete.
+        Install openocd: sudo apt-get install openocd
+    on_success:
+      message: "Debug probe check complete"
+
+  # ---- 6. Consolidate results into JSON report ----------------------------
+  - id: report
+    description: Collect all diagnostic results into board_diag_report.json
+    depends_on: [check_debug_probe]
+    run: bash scripts/board_diag_report.sh
+    check:
+      - type: exit_code
+        value: 0
+      - type: file_exists
+        path: "{{ env.LOG_DIR }}/board_diag_report.json"
+      - type: log_grep
+        file: "{{ env.LOG_DIR }}/board_diag_report.log"
+        pattern: "Board diagnostic report PASSED"
+    on_failure:
+      action: abort
+      message: >
+        Report generation failed.
+        Check: {{ env.LOG_DIR }}/board_diag_report.log
+    on_success:
+      message: "Diagnostic complete — report: {{ env.LOG_DIR }}/board_diag_report.json"

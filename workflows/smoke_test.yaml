@@ -1,0 +1,219 @@
+name: smoke_test
+description: >
+  End-to-end smoke test: build a firmware example, flash it to the board,
+  and verify expected UART output. Use this to confirm a target builds and
+  runs correctly on real hardware.
+  Chain: build → verify_artifact → reboot_bootsel → flash → wait_boot → check_uart → report
+
+# ---------------------------------------------------------------------------
+# Parameters
+# ---------------------------------------------------------------------------
+params:
+  target:
+    description: >
+      CMake target name to build and test (e.g. blink, hello_serial, hello_usb).
+      Use --list-targets to enumerate available targets.
+    default: "hello_serial"
+  board:
+    description: Pico board type (pico | pico_w | pico2 | pico2_w)
+    default: "pico"
+  platform:
+    description: Target platform (rp2040 | rp2350-arm-s | rp2350-riscv)
+    default: "rp2040"
+  serial_port:
+    description: UART serial device for capturing output
+    default: "/dev/ttyS4"
+  serial_baud:
+    description: UART baud rate
+    default: "115200"
+  uart_expect_pattern:
+    description: >
+      Regex pattern expected in UART output (e.g. "Hello, world!").
+      Leave empty to skip UART verification (e.g. for blink).
+    default: ""
+  uart_timeout_seconds:
+    description: Seconds to wait for UART output before failing
+    default: "10"
+  boot_wait_seconds:
+    description: Seconds to wait after firmware boot before reading UART
+    default: "5"
+  flash_method:
+    description: Flash method (picotool | uf2_copy | openocd)
+    default: "picotool"
+  build_dir:
+    description: CMake build output directory
+    default: "build"
+  log_dir:
+    description: Directory for per-step log files
+    default: "logs"
+
+# ---------------------------------------------------------------------------
+# Environment — injected into every subprocess
+# ---------------------------------------------------------------------------
+env:
+  TARGET:              "{{ params.target }}"
+  PICO_BOARD:          "{{ params.board }}"
+  PICO_PLATFORM:       "{{ params.platform }}"
+  SERIAL_PORT:         "{{ params.serial_port }}"
+  SERIAL_BAUD:         "{{ params.serial_baud }}"
+  UART_EXPECT_PATTERN: "{{ params.uart_expect_pattern }}"
+  UART_TIMEOUT:        "{{ params.uart_timeout_seconds }}"
+  BOOT_WAIT_SECONDS:   "{{ params.boot_wait_seconds }}"
+  FLASH_METHOD:        "{{ params.flash_method }}"
+  BUILD_DIR:           "{{ params.build_dir }}"
+  LOG_DIR:             "{{ params.log_dir }}"
+
+# ---------------------------------------------------------------------------
+# Steps
+# ---------------------------------------------------------------------------
+steps:
+
+  # ---- 1. Build the target -------------------------------------------------
+  - id: build
+    description: "Build CMake target '{{ params.target }}' for {{ params.board }} ({{ params.platform }})"
+    run: >-
+      python3 runner/workflow_runner.py workflows/build_example.yaml
+      --param target={{ params.target }}
+      --param board={{ params.board }}
+      --param platform={{ params.platform }}
+      --state-file {{ params.log_dir }}/build_example_state.json
+    check:
+      - type: exit_code
+        value: 0
+    on_failure:
+      action: abort
+      message: >
+        Build failed for target '{{ params.target }}'.
+        Check: logs/build_target.log for compiler errors.
+        Verify the target name with: python3 runner/workflow_runner.py --list-targets
+    on_success:
+      message: "Built {{ params.target }} for {{ params.board }}"
+
+  # ---- 2. Verify the UF2 artifact ------------------------------------------
+  - id: verify_artifact
+    description: Confirm UF2 is valid RP2040/RP2350 firmware via picotool info
+    depends_on: [build]
+    run: bash scripts/verify_artifact.sh
+    check:
+      - type: exit_code
+        value: 0
+      - type: log_grep
+        file: "{{ env.LOG_DIR }}/verify_artifact.log"
+        pattern: "verify_artifact PASSED"
+    on_failure:
+      action: abort
+      message: >
+        Artifact verification failed — UF2 may be corrupt or wrong chip family.
+        Check: {{ env.LOG_DIR }}/verify_artifact.log
+    on_success:
+      message: "{{ params.target }}.uf2 verified as valid firmware"
+
+  # ---- 3. Enter BOOTSEL mode -----------------------------------------------
+  - id: reboot_bootsel
+    description: Put board into BOOTSEL (USB mass-storage) mode, retry up to 3 times
+    depends_on: [verify_artifact]
+    run: bash scripts/reboot_bootsel.sh
+    check:
+      - type: exit_code
+        value: 0
+      - type: log_grep
+        file: "{{ env.LOG_DIR }}/reboot_bootsel.log"
+        pattern: "reboot_bootsel PASSED"
+    on_failure:
+      action: report
+      message: >
+        Board did not enter BOOTSEL mode.
+        Check: board is powered and USB is connected.
+        Manual recovery: run 'reboot_pico' in a terminal, then re-run with --resume.
+    on_success:
+      message: "Board in BOOTSEL mode — ready to flash"
+
+  # ---- 4. Flash firmware ---------------------------------------------------
+  - id: flash
+    description: "Flash {{ params.target }}.uf2 via {{ params.flash_method }}"
+    depends_on: [reboot_bootsel]
+    run: bash scripts/flash_firmware.sh
+    check:
+      - type: exit_code
+        value: 0
+      - type: log_grep
+        file: "{{ env.LOG_DIR }}/flash_firmware.log"
+        pattern: "flash_firmware PASSED"
+    on_failure:
+      action: abort
+      message: >
+        Flash failed. Check:
+          - Board was in BOOTSEL mode (reboot_bootsel step)
+          - FLASH_METHOD={{ params.flash_method }} is available
+          - {{ env.LOG_DIR }}/flash_firmware.log for details
+    on_success:
+      message: "Flashed {{ params.target }}.uf2 via {{ params.flash_method }}"
+
+  # ---- 5. Wait for boot ----------------------------------------------------
+  - id: wait_boot
+    description: >
+      Wait {{ params.boot_wait_seconds }}s for firmware to boot and serial port to appear.
+      Skipped automatically for 'blink' (no serial output).
+    depends_on: [flash]
+    run: >-
+      bash -c
+      'if [ "{{ params.target }}" = "blink" ]; then
+        echo "Skipping wait_boot for blink (no UART output)"; exit 0;
+      fi;
+      sleep {{ params.boot_wait_seconds }};
+      test -c "{{ env.SERIAL_PORT }}"'
+    check:
+      - type: exit_code
+        value: 0
+    on_failure:
+      action: report
+      message: >
+        Serial port {{ params.serial_port }} did not appear after boot.
+        Check: board rebooted into firmware, UART wiring, port path.
+        Skip UART verification with: --param uart_expect_pattern=""
+    on_success:
+      message: "Board booted — {{ params.serial_port }} ready"
+
+  # ---- 6. Capture UART and verify pattern ----------------------------------
+  - id: check_uart
+    description: >
+      Capture serial output for {{ params.uart_timeout_seconds }}s and match
+      '{{ params.uart_expect_pattern }}'. Skipped if pattern is empty or target is blink.
+    depends_on: [wait_boot]
+    run: bash scripts/capture_uart.sh
+    check:
+      - type: exit_code
+        value: 0
+      - type: log_grep
+        file: "{{ env.LOG_DIR }}/uart_{{ params.target }}.log"
+        pattern: "{{ params.uart_expect_pattern }}"
+    on_failure:
+      action: report
+      message: >
+        UART verification failed: pattern '{{ params.uart_expect_pattern }}' not found.
+        Check: {{ env.LOG_DIR }}/uart_{{ params.target }}.log for actual output.
+        Adjust pattern with: --param uart_expect_pattern="<regex>"
+        Increase timeout with: --param uart_timeout_seconds=15
+    on_success:
+      message: "UART output verified on {{ params.serial_port }}"
+
+  # ---- 7. Generate smoke test report ---------------------------------------
+  - id: report
+    description: Collect all step results into smoke_test_report.json
+    depends_on: [check_uart]
+    run: bash scripts/smoke_report.sh
+    check:
+      - type: exit_code
+        value: 0
+      - type: file_exists
+        path: "{{ env.LOG_DIR }}/smoke_test_report.json"
+      - type: log_grep
+        file: "{{ env.LOG_DIR }}/smoke_report.log"
+        pattern: "smoke_report PASSED"
+    on_failure:
+      action: abort
+      message: >
+        Report generation failed.
+        Check: {{ env.LOG_DIR }}/smoke_report.log
+    on_success:
+      message: "Smoke test complete — report: {{ env.LOG_DIR }}/smoke_test_report.json"
