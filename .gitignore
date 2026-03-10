@@ -5,6 +5,8 @@ cmake-*
 build
 build-*
 build_*
+!workflows/build_*
+!.claude
 .DS_Store
 *.pdf
 logs

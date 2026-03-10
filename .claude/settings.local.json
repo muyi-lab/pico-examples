@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(chmod +x:*)",
+      "Bash(LOG_DIR=logs/smoke bash:*)",
+      "WebFetch(domain:docs.radxa.com)"
+    ]
+  }
+}

@@ -1,0 +1,153 @@
+name: build_example
+description: >
+  End-to-end workflow: verify toolchain, initialise pico-sdk, configure CMake,
+  build a single target, and verify the output artifacts.
+
+# ---------------------------------------------------------------------------
+# Parameters — all have defaults; override with --param KEY=VALUE
+# ---------------------------------------------------------------------------
+params:
+  target:
+    description: CMake target name to build (e.g. hello_serial)
+    default: hello_serial
+  board:
+    description: Pico board type (pico | pico_w | pico2 | pico2_w)
+    default: pico
+  platform:
+    description: Target platform (rp2040 | rp2350-arm-s | rp2350-riscv)
+    default: rp2040
+  build_type:
+    description: CMake build type (Release | Debug | MinSizeRel)
+    default: Release
+  sdk_path:
+    description: Absolute path to a pre-cloned pico-sdk checkout
+    default: "$HOME/pico/pico-sdk"
+  build_dir:
+    description: Out-of-source CMake build directory
+    default: build
+  log_dir:
+    description: Directory for per-script log files
+    default: logs
+
+# ---------------------------------------------------------------------------
+# Environment variables — injected into every subprocess
+# References use {{ params.KEY }} syntax
+# ---------------------------------------------------------------------------
+env:
+  PICO_SDK_PATH:  "{{ params.sdk_path }}"
+  PICO_BOARD:     "{{ params.board }}"
+  PICO_PLATFORM:  "{{ params.platform }}"
+  BUILD_TYPE:     "{{ params.build_type }}"
+  BUILD_DIR:      "{{ params.build_dir }}"
+  LOG_DIR:        "{{ params.log_dir }}"
+
+# ---------------------------------------------------------------------------
+# Steps — executed in dependency order (topological sort)
+# ---------------------------------------------------------------------------
+steps:
+
+  # ---- 1. Toolchain check --------------------------------------------------
+  - id: check_toolchain
+    description: Verify arm-none-eabi-gcc, cmake >= 3.13, python3, and make/ninja
+    run: bash scripts/check_toolchain.sh
+    check:
+      - type: exit_code
+        value: 0
+      - type: log_grep
+        file: "{{ env.LOG_DIR }}/check_toolchain.log"
+        pattern: "Toolchain check PASSED"
+    on_failure:
+      action: abort
+      message: >
+        Install missing tools:
+          sudo apt-get install gcc-arm-none-eabi binutils-arm-none-eabi cmake python3 build-essential
+    on_success:
+      message: "Toolchain OK"
+
+  # ---- 2. SDK setup --------------------------------------------------------
+  - id: setup_sdk
+    description: Clone and initialise pico-sdk (idempotent)
+    depends_on: [check_toolchain]
+    run: bash scripts/setup_sdk.sh
+    check:
+      - type: exit_code
+        value: 0
+      - type: file_exists
+        path: "{{ env.PICO_SDK_PATH }}/pico_sdk_init.cmake"
+      - type: log_grep
+        file: "{{ env.LOG_DIR }}/setup_sdk.log"
+        pattern: "SDK setup PASSED"
+    on_failure:
+      action: abort
+      message: >
+        SDK setup failed. Check:
+          - PICO_SDK_PATH is correct (currently: {{ env.PICO_SDK_PATH }})
+          - Network access is available for git clone
+          - Run: bash scripts/setup_sdk.sh manually to see the full error
+    on_success:
+      message: "SDK ready at {{ env.PICO_SDK_PATH }}"
+
+  # ---- 3. CMake configure --------------------------------------------------
+  - id: cmake_configure
+    description: Configure CMake build (board={{ params.board }}, platform={{ params.platform }}, type={{ params.build_type }})
+    depends_on: [setup_sdk]
+    run: bash scripts/cmake_configure.sh
+    check:
+      - type: exit_code
+        value: 0
+      - type: file_exists
+        path: "{{ env.BUILD_DIR }}/CMakeCache.txt"
+      - type: log_grep
+        file: "{{ env.LOG_DIR }}/cmake_configure.log"
+        pattern: "CMake configure PASSED"
+    on_failure:
+      action: abort
+      message: >
+        CMake configuration failed. Check:
+          - PICO_SDK_PATH is valid ({{ env.PICO_SDK_PATH }})
+          - cmake version >= 3.13
+          - Run: bash scripts/cmake_configure.sh manually to see details
+    on_success:
+      message: "CMake configured → {{ env.BUILD_DIR }}"
+
+  # ---- 4. Build target -----------------------------------------------------
+  - id: build_target
+    description: Build CMake target "{{ params.target }}"
+    depends_on: [cmake_configure]
+    run: "bash scripts/build_target.sh {{ params.target }}"
+    check:
+      - type: exit_code
+        value: 0
+      - type: log_grep
+        file: "{{ env.LOG_DIR }}/build_target.log"
+        pattern: "Build PASSED"
+    on_failure:
+      action: abort
+      message: >
+        Build failed for target "{{ params.target }}". Check:
+          - Target name is correct (use --list-targets to enumerate)
+          - Build log: {{ env.LOG_DIR }}/build_target.log
+          - Ensure cmake_configure step completed for the right board/platform
+    on_success:
+      message: "Build complete for {{ params.target }}"
+
+  # ---- 5. Verify output ----------------------------------------------------
+  - id: verify_output
+    description: Verify UF2, ELF, and BIN artifacts for "{{ params.target }}"
+    depends_on: [build_target]
+    run: "bash scripts/verify_output.sh {{ params.target }}"
+    check:
+      - type: exit_code
+        value: 0
+      - type: log_grep
+        file: "{{ env.LOG_DIR }}/verify_output.log"
+        pattern: "Verify PASSED"
+    on_failure:
+      action: abort
+      message: >
+        Artifact verification failed for "{{ params.target }}". Check:
+          - Artifacts exist under {{ env.BUILD_DIR }}/
+          - UF2 magic bytes are valid (run: xxd -l 4 <file>.uf2)
+          - Verify log: {{ env.LOG_DIR }}/verify_output.log
+    on_success:
+      message: "All artifacts verified — {{ params.target }}.uf2 is ready to flash"
