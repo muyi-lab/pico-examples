@@ -26,7 +26,7 @@ from pathlib import Path
 # Empty pattern → UART check skipped (e.g. visual-only targets)
 # ---------------------------------------------------------------------------
 REGRESSION_TARGETS = [
-    ("hello_serial",        "Hello, world"),
+    ("hello_serial",        "Hello, macro"),
     ("hello_multicore",     "Hello, multicore"),
     ("hello_timer",         "Hello Timer"),
     ("hello_dma",           r"Hello, world! \(from DMA\)"),
